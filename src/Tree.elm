@@ -6,7 +6,8 @@ module Tree exposing
     , toList, leaves, links
     , map, indexedMap, mapAccumulate, map2, indexedMap2, mapAccumulate2, andMap
     , find
-    , sortWith, unfold, restructure
+    , unfold, stratify, StratifyError(..), stratifyWithPath
+    , sortWith, restructure
     , Step(..), breadthFirstFold, depthFirstFold, depthFirstTraversal
     )
 
@@ -69,9 +70,14 @@ children of their own, and so on.
 @docs find
 
 
+# Creating trees from other data
+
+@docs unfold, stratify, StratifyError, stratifyWithPath
+
+
 # Fancy stuff
 
-@docs sortWith, unfold, restructure
+@docs sortWith, restructure
 
 
 # Advanced: Generic traversals
@@ -98,6 +104,9 @@ You may want to read the source of this module for inspiration on how to use the
 functions.
 
 -}
+
+import Dict
+import Set
 
 
 {-| Represents a multiway tree. Each node in the tree holds a piece of
@@ -242,7 +251,7 @@ children (Tree _ c) =
         , tree "upper2" [ singleton "lower2"]
         , singleton "upper3"
         ]
-        |> updateChildren (List.map (mapLabel String.toUpper))
+        |> updateChildren (List.map (updateLabel String.toUpper))
     --> tree "lower1"
     -->     [ singleton "UPPER1"
     -->     , tree "UPPER2" [ singleton "lower2"]
@@ -459,6 +468,263 @@ unfold f seed =
         ()
         (singleton seed)
         |> Tuple.second
+
+
+{-| `stratify` tries to convert the entire
+dataset into a tree. If that cannot be achieved, it returns the
+following errors:
+
+**`MultipleRoots a a`** is returned when there is more than one node
+where `.parentId` returns `Nothing`. The error contains the first
+two nodes that had such property.
+
+    [ ( "root1", Nothing )
+    , ( "root2", Nothing)
+    ]
+    |> stratify { id = Tuple.first, parentId = Tuple.second, transform = Tuple.first }
+    --> Err (MultipleRoots "root1" "root2")
+
+**`NoRoot`** is returned when there is no node where `.parentId` returns
+`Nothing` (or an empty list is passed)
+
+    [ ( "leaf1", Just "root" )
+    , ( "leaf2", Just "root" )
+    ]
+    |> stratify { id = Tuple.first, parentId = Tuple.second, transform = Tuple.first }
+    --> Err NoRoot
+
+**`NodeItsOwnParent a`** happens when `.id` is the same as `.parentId` for a node:
+
+    [ ("loop", Just "loop") ]
+    |> stratify { id = Tuple.first, parentId = Tuple.second, transform = Tuple.first }
+    --> Err (NodeItsOwnParent "loop")
+
+**`DuplicatedId a`** happens when there are two (or more) elements that return the same
+`.id`.
+
+     [ ( "root", Nothing )
+    , ( "xxx", Just "root" )
+    , ( "xxx", Just "root" )
+    ]
+    |> stratify { id = Tuple.first, parentId = Tuple.second, transform = Tuple.first }
+    --> Err (DuplicateId "xxx")
+
+**`DisconnectedNodes (Tree a)`** happens when not all input items connect to the tree
+(i.e. there are "orphan" items). This is an error where a tree was constructed, but
+this error signals that some of the data is missing in the resulting tree.
+
+    [ ( "root", Nothing )
+    , ( "leaf1", Just "root" )
+    , ( "leaf2", Just "root" )
+    , ( "orphan", Just "nobody" )
+    ]
+    |> stratify { id = Tuple.first, parentId = Tuple.second, transform = Tuple.first }
+    --> Err (DisconnectedNodes (
+    -->    tree "root"
+    -->        [ singleton "leaf1", singleton "leaf2" ]
+    --> ))
+
+-}
+type StratifyError a
+    = MultipleRoots a a
+    | NoRoot
+    | NodeItsOwnParent a
+    | DuplicateId a
+    | DisconnectedNodes (Tree a)
+
+
+{-| The other way tree data is sometimes represented in flat formats
+is that each item stores a path to the root. Common examples are filesystems
+where we see file paths such as "foo/bar/baz.txt" or DNS "my.domain.com".
+
+This function will recreate the tree based on these paths:
+
+    [ "Tree"
+    , "Tree/Zipper"
+    , "Tree/Diff/Internal"
+    , "Tests"
+    ]
+    |> stratifyWithPath
+        { path = String.split "/"
+        , createMissingNode = String.join "/"
+        }
+    --> Ok (tree ""
+    -->       [ tree "Tree"
+    -->           [ singleton "Tree/Zipper"
+    -->           , tree "Tree/Diff"
+    -->               [ singleton "Tree/Diff/Internal"
+    -->               ]
+    -->           ]
+    -->       , singleton "Tests"
+    -->       ]
+    -->   )
+
+Because `stratifyWithPath` creates missing nodes in the hierarchy,
+it will succeed with most input data. The only way to make it fail
+is if there are items with duplicate paths. In that case the `Err`
+contains the path that was duplicated.
+
+    [ [ "foo" ] , [ "foo" ] ]
+        |> stratifyWithPath { path = identity, createMissingNode = identity }
+    --> Err [ "foo" ]
+
+The root of the tree is always represented by the empty list.
+
+-}
+stratifyWithPath : { path : a -> List comparable, createMissingNode : List comparable -> a } -> List a -> Result (List comparable) (Tree a)
+stratifyWithPath { path, createMissingNode } nodes =
+    List.map (\item -> ( List.reverse (path item), item )) nodes
+        |> List.sortBy (Tuple.first >> List.length)
+        |> List.foldl
+            (\( reversedPath, item ) ( seenSoFar, nodes_ ) ->
+                let
+                    wrapNode revPath n =
+                        case revPath of
+                            [] ->
+                                { id = [], parentId = Nothing, node = n }
+
+                            _ :: xs ->
+                                { id = revPath
+                                , parentId = Just xs
+                                , node = n
+                                }
+
+                    createParentNodes revPath newNodes =
+                        case revPath of
+                            [] ->
+                                if Set.member [] seenSoFar then
+                                    newNodes
+
+                                else
+                                    wrapNode revPath (createMissingNode []) :: newNodes
+
+                            _ :: xs ->
+                                if Set.member revPath seenSoFar then
+                                    createParentNodes xs newNodes
+
+                                else
+                                    createParentNodes xs (wrapNode revPath (createMissingNode (List.reverse revPath)) :: newNodes)
+
+                    current =
+                        wrapNode reversedPath item
+
+                    nodesToCreate =
+                        case reversedPath of
+                            [] ->
+                                [ current ]
+
+                            _ :: xs ->
+                                createParentNodes xs [ current ]
+                in
+                ( List.foldl (\i -> Set.insert i.id) seenSoFar nodesToCreate, nodesToCreate :: nodes_ )
+            )
+            ( Set.empty, [] )
+        |> Tuple.second
+        |> List.concat
+        |> List.reverse
+        |> (\n ->
+                if List.isEmpty n then
+                    [ { id = [], parentId = Nothing, node = createMissingNode [] } ]
+
+                else
+                    n
+           )
+        |> stratify { id = .id, parentId = .parentId, transform = .node }
+        |> Result.mapError
+            (\e ->
+                case e of
+                    DuplicateId n ->
+                        path n
+
+                    _ ->
+                        -- can't happen
+                        []
+            )
+
+
+{-| It is fairly common for tree data to be stored flattened (for instance
+in database tables or CSV files) into lists. A common way this is done is
+for each node in the tree to store the ID of its parent.
+
+Stratify helps you recover the tree structure from data stored like this.
+
+    [ ( "root", Nothing )
+    , ( "leaf1", Just "root" )
+    , ( "branch", Just "root" )
+    , ( "leaf2", Just "branch" )
+    , ( "leaf3", Just "branch" )
+    ]
+    |> stratify { id = Tuple.first, parentId = Tuple.second, transform = Tuple.first }
+    --> Ok (tree "root"
+    -->     [ singleton "leaf1"
+    -->     , tree "branch"
+    -->         [ singleton "leaf2"
+    -->         , singleton "leaf3"
+    -->         ]
+    -->     ]
+    --> )
+
+-}
+stratify : { id : a -> comparable, parentId : a -> Maybe comparable, transform : a -> b } -> List a -> Result (StratifyError b) (Tree b)
+stratify { id, parentId, transform } nodes =
+    List.foldr
+        (\item ->
+            Result.andThen
+                (\( maybeRoot, parentBag, seenIds ) ->
+                    let
+                        nodeId =
+                            id item
+
+                        node_ =
+                            transform item
+                    in
+                    if Set.member nodeId seenIds then
+                        Err (DuplicateId node_)
+
+                    else
+                        case parentId item of
+                            Nothing ->
+                                case maybeRoot of
+                                    Nothing ->
+                                        Ok ( Just ( nodeId, node_ ), parentBag, Set.insert nodeId seenIds )
+
+                                    Just ( _, prevRoot ) ->
+                                        Err (MultipleRoots node_ prevRoot)
+
+                            Just actualNodeParentId ->
+                                if actualNodeParentId == nodeId then
+                                    Err (NodeItsOwnParent node_)
+
+                                else
+                                    Ok ( maybeRoot, Dict.update actualNodeParentId (\items -> Just (( nodeId, node_ ) :: Maybe.withDefault [] items)) parentBag, Set.insert nodeId seenIds )
+                )
+        )
+        (Ok ( Nothing, Dict.empty, Set.empty ))
+        nodes
+        |> Result.andThen
+            (\( maybeRoot, parentBag, _ ) ->
+                case maybeRoot of
+                    Just root ->
+                        let
+                            completed =
+                                unfold
+                                    (\( itemId, item ) ->
+                                        ( item
+                                        , Dict.get itemId parentBag
+                                            |> Maybe.withDefault []
+                                        )
+                                    )
+                                    root
+                        in
+                        if length completed == List.length nodes then
+                            Ok completed
+
+                        else
+                            Err (DisconnectedNodes completed)
+
+                    Nothing ->
+                        Err NoRoot
+            )
 
 
 {-| Run a function on every label in the tree.
