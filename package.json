@@ -16,7 +16,7 @@
     "test:run": "elm-test",
     "test:review": "elm-review",
     "preview-docs": "elm-doc-preview",
-    "elm-bump": "npm-run-all --print-name --silent --sequential test bump-version 'test:review -- --fix-all-without-prompt' update-examples",
+    "elm-bump": "npm-run-all --print-name --sequential test bump-version 'test:review -- --fix-all-without-prompt'",
     "bump-version": "(yes | elm bump)"
   }
 }
