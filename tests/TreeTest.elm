@@ -1,7 +1,8 @@
-module TreeTest exposing (depthFirstTraversalTest, flattenTest, foldlTest, foldrTest, indexedMap, indexedMap2, lengthTest, map2, mapTest, unfold)
+module TreeTest exposing (depthFirstTraversalTest, flattenTest, foldlTest, foldrTest, indexedMap, indexedMap2, lengthTest, map2, mapTest, stratifyTest, stratifyWithPathTest, unfold)
 
 import Expect
 import Fuzz as F
+import Set
 import Test exposing (Test, describe, fuzz, test)
 import Tree exposing (Tree, tree)
 
@@ -363,3 +364,52 @@ depthFirstTraversalTest =
                             ]
                         )
         ]
+
+
+stratifyWithPathTest : Test
+stratifyWithPathTest =
+    describe "stratifyWithPath"
+        [ fuzz (F.map (Set.fromList >> Set.toList) (F.list (F.list (F.oneOfValues [ "foo", "bar", "baz" ])))) "succeeds as long as there are no duplicates" <|
+            \lst ->
+                lst
+                    |> Tree.stratifyWithPath { path = identity, createMissingNode = identity }
+                    |> Expect.ok
+        ]
+
+
+stratifyTest : Test
+stratifyTest =
+    describe "stratify"
+        [ fuzz fuzzUniqTree "is sort of inverse to links" <|
+            \tree ->
+                (( Nothing, 0 ) :: List.map (Tuple.mapFirst Just) (Tree.links tree))
+                    |> Tree.stratify { id = Tuple.second, parentId = Tuple.first, transform = Tuple.second }
+                    |> Expect.equal (Ok tree)
+        ]
+
+
+fuzzTree : F.Fuzzer child -> F.Fuzzer (Tree child)
+fuzzTree child =
+    let
+        go depth branch =
+            if depth > 0 then
+                F.map2
+                    (\label children ->
+                        Tree.tree label children
+                    )
+                    child
+                    (F.listOfLengthBetween 0 branch (go (depth - 1) branch))
+
+            else
+                F.map
+                    (\label ->
+                        Tree.singleton label
+                    )
+                    child
+    in
+    go 5 5
+
+
+fuzzUniqTree : F.Fuzzer (Tree Int)
+fuzzUniqTree =
+    F.map (Tree.indexedMap (\i _ -> i)) (fuzzTree (F.constant ()))
